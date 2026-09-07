@@ -1,0 +1,306 @@
+// Personal Finance OS - Prisma Database Schema
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AccountType {
+  CHECKING
+  SAVINGS
+  CREDIT_CARD
+  CASH_WALLET
+  INVESTMENT
+  LOAN
+}
+
+enum TransactionType {
+  EXPENSE
+  INCOME
+  TRANSFER
+  REFUND
+  ADJUSTMENT
+}
+
+enum EntryType {
+  ACCOUNT_LEG
+  CATEGORY_LEG
+  RECEIVABLE_LEG
+  PAYABLE_LEG
+}
+
+enum ImportStatus {
+  PENDING
+  PARSING
+  PREVIEW_READY
+  COMMITTED
+  FAILED
+}
+
+enum ImportRecordStatus {
+  PENDING
+  MATCHED_DUPLICATE
+  VALIDATED
+  COMMITTED
+  IGNORED
+}
+
+enum RuleMatchField {
+  PAYEE
+  RAW_DESCRIPTION
+  AMOUNT
+}
+
+enum RuleMatchType {
+  EXACT
+  CONTAINS
+  STARTS_WITH
+  REGEX
+}
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String    @unique @db.VarChar(255)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  firstName    String    @map("first_name") @db.VarChar(100)
+  lastName     String?   @map("last_name") @db.VarChar(100)
+  baseCurrency String    @default("INR") @map("base_currency") @db.VarChar(3)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt    DateTime?  @map("deleted_at") @db.Timestamptz(6)
+
+  accounts             Account[]
+  categories           Category[]
+  transactions         Transaction[]
+  tags                 Tag[]
+  categorizationRules  CategorizationRule[]
+  importBatches        ImportBatch[]
+  auditLogs            TransactionAuditLog[]
+  refreshSessions      RefreshSession[]
+
+  @@map("users")
+}
+
+model Account {
+  id                 String      @id @default(uuid()) @db.Uuid
+  userId             String      @map("user_id") @db.Uuid
+  name               String      @db.VarChar(100)
+  type               AccountType
+  currency           String      @default("INR") @db.VarChar(3)
+  currentBalance     BigInt      @default(0) @map("current_balance")
+  initialBalance     BigInt      @default(0) @map("initial_balance")
+  accountNumberMask  String?     @map("account_number_mask") @db.VarChar(10)
+  institutionName    String?     @map("institution_name") @db.VarChar(100)
+  isArchived         Boolean     @default(false) @map("is_archived")
+  createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt          DateTime?   @map("deleted_at") @db.Timestamptz(6)
+
+  user               User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactionEntries TransactionEntry[]
+  importBatches      ImportBatch[]
+
+  @@index([userId, isArchived])
+  @@map("accounts")
+}
+
+model Category {
+  id        String     @id @default(uuid()) @db.Uuid
+  userId    String?    @map("user_id") @db.Uuid
+  parentId  String?    @map("parent_id") @db.Uuid
+  name      String     @db.VarChar(100)
+  icon      String?    @db.VarChar(50)
+  color     String?    @db.VarChar(20)
+  isSystem  Boolean    @default(false) @map("is_system")
+  createdAt DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user                 User?                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent               Category?             @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children             Category[]             @relation("CategoryHierarchy")
+  transactionEntries   TransactionEntry[]
+  categorizationRules  CategorizationRule[]
+  importedTransactions ImportedTransactionRecord[]
+
+  @@index([userId, parentId])
+  @@map("categories")
+}
+
+model Transaction {
+  id                  String          @id @default(uuid()) @db.Uuid
+  userId              String          @map("user_id") @db.Uuid
+  type                TransactionType
+  transactionDate     DateTime        @map("transaction_date") @db.Timestamptz(6)
+  payee               String          @db.VarChar(150)
+  totalAmount         BigInt          @map("total_amount")
+  currency            String          @default("INR") @db.VarChar(3)
+  rawDescription      String?         @map("raw_description") @db.Text
+  notes               String?         @db.Text
+  isRecurring         Boolean         @default(false) @map("is_recurring")
+  importBatchId       String?         @map("import_batch_id") @db.Uuid
+  parentTransactionId String?         @map("parent_transaction_id") @db.Uuid
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt          DateTime?       @map("deleted_at") @db.Timestamptz(6)
+
+  user               User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  importBatch         ImportBatch?    @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  parentTransaction   Transaction?    @relation("TransactionReversals", fields: [parentTransactionId], references: [id], onDelete: SetNull)
+  childTransactions   Transaction[]   @relation("TransactionReversals")
+  entries             TransactionEntry[]
+  tags                TransactionTag[]
+  auditLogs           TransactionAuditLog[]
+  committedImports    ImportedTransactionRecord[] @relation("CommittedTransaction")
+  matchedImports      ImportedTransactionRecord[] @relation("MatchedDuplicateTransaction")
+
+
+  @@index([userId, transactionDate(sort: Desc)])
+  @@index([userId, payee])
+  @@index([importBatchId])
+  @@map("transactions")
+}
+
+model TransactionEntry {
+  id            String      @id @default(uuid()) @db.Uuid
+  transactionId  String      @map("transaction_id") @db.Uuid
+  accountId     String?     @map("account_id") @db.Uuid
+  categoryId    String?     @map("category_id") @db.Uuid
+  entryType     EntryType   @map("entry_type")
+  amount        BigInt
+  memo          String?     @db.VarChar(255)
+
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  account       Account?    @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  category      Category?   @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([transactionId])
+  @@index([accountId])
+  @@index([categoryId])
+  @@map("transaction_entries")
+}
+model Tag {
+  id       String           @id @default(uuid()) @db.Uuid
+  userId  String           @map("user_id") @db.Uuid
+  name    String           @db.VarChar(50)
+
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions TransactionTag[]
+
+  @@unique([userId, name])
+  @@map("tags")
+}
+
+model TransactionTag {
+  transactionId String      @map("transaction_id") @db.Uuid
+  tagId         String      @map("tag_id") @db.Uuid
+
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  tag           Tag         @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([transactionId, tagId])
+  @@map("transaction_tags")
+}
+
+model CategorizationRule {
+  id               String          @id @default(uuid()) @db.Uuid
+  userId           String          @map("user_id") @db.Uuid
+  matchField       RuleMatchField  @map("match_field")
+  matchType        RuleMatchType   @map("match_type")
+  pattern          String          @db.VarChar(255)
+  targetCategoryId String          @map("target_category_id") @db.Uuid
+  priority         Int            @default(0)
+  isActive         Boolean         @default(true) @map("is_active")
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user             User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetCategory   Category        @relation(fields: [targetCategoryId], references: [id], onDelete: Restrict)
+
+  @@index([userId, isActive, priority(sort: Desc)])
+  @@map("categorization_rules")
+}
+model ImportBatch {
+  id                String         @id @default(uuid()) @db.Uuid
+  userId            String         @map("user_id") @db.Uuid
+  accountId         String         @map("account_id") @db.Uuid
+  fileName          String         @map("file_name") @db.VarChar(255)
+  fileHash          String         @map("file_hash") @db.VarChar(64)
+  parserType        String         @map("parser_type") @db.VarChar(50)
+  status            ImportStatus   @default(PENDING)
+  totalRecords      Int           @default(0) @map("total_records")
+  successfulRecords Int           @default(0) @map("successful_records")
+  duplicateRecords  Int           @default(0) @map("duplicate_records")
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account           Account         @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  records           ImportedTransactionRecord[]
+  transactions      Transaction[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("import_batches")
+}
+
+model ImportedTransactionRecord {
+  id                     String              @id @default(uuid()) @db.Uuid
+  batchId                String              @map("batch_id") @db.Uuid
+  rawData                Json                @map("raw_data")
+  fingerprintHash        String              @map("fingerprint_hash") @db.VarChar(64)
+  parsedDate             DateTime            @map("parsed_date") @db.Timestamptz(6)
+  parsedAmount           BigInt              @map("parsed_amount")
+  parsedPayee            String?             @map("parsed_payee") @db.VarChar(150)
+  suggestedCategoryId    String?             @map("suggested_category_id") @db.Uuid
+  status                 ImportRecordStatus  @default(PENDING)
+  matchedTransactionId   String?             @map("matched_transaction_id") @db.Uuid
+  committedTransactionId String?             @map("committed_transaction_id") @db.Uuid
+
+  batch                  ImportBatch         @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  suggestedCategory      Category?           @relation(fields: [suggestedCategoryId], references: [id], onDelete: SetNull)
+  matchedTransaction     Transaction?        @relation("MatchedDuplicateTransaction", fields: [matchedTransactionId], references: [id], onDelete: SetNull)
+  committedTransaction   Transaction?        @relation("CommittedTransaction", fields: [committedTransactionId], references: [id], onDelete: SetNull)
+
+  @@index([batchId, status])
+  @@index([fingerprintHash])
+  @@map("imported_transaction_records")
+}
+
+model TransactionAuditLog {
+  id            String      @id @default(uuid()) @db.Uuid
+  transactionId String      @map("transaction_id") @db.Uuid
+  userId         String      @map("user_id") @db.Uuid
+  action         String      @db.VarChar(20)
+  previousState Json?       @map("previous_state")
+  newState       Json        @map("new_state")
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("transaction_audit_logs")
+}
+
+model RefreshSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
+  userAgent  String?  @map("user_agent") @db.VarChar(255)
+  ipAddress  String?  @map("ip_address") @db.VarChar(45)
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+
+  @@index([userId, expiresAt])
+  @@index([tokenHash])
+  @@map("refresh_sessions")
+}
